@@ -171,8 +171,11 @@ fn run_impl<CER: ConfiguredRaftEngine, F: KvFormat>(
     tikv.run_status_server();
     tikv.core.init_quota_tuning_task(tikv.quota_limiter.clone());
 
-    // Build a background worker for handling signals.
-    {
+    tikv::server::local::set_ready(true);
+
+    // Build a background worker for handling signals. An embedding process
+    // owns signal handling and stops TiKV through the service event channel.
+    if !tikv::server::local::is_embedded() {
         let kv_statistics = tikv.kv_statistics.clone();
         let raft_statistics = tikv.raft_statistics.clone();
         // TODO: support signal dump stats
@@ -205,6 +208,7 @@ fn run_impl<CER: ConfiguredRaftEngine, F: KvFormat>(
             }
         }
     }
+    tikv::server::local::unregister();
     tikv.stop();
 }
 

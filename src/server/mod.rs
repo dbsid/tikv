@@ -10,6 +10,7 @@ mod engine_factory;
 pub mod errors;
 pub mod gc_worker;
 pub mod load_statistics;
+pub mod local;
 pub mod lock_manager;
 mod proxy;
 pub mod raft_server;

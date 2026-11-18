@@ -198,8 +198,11 @@ fn run_impl<CER, F>(
     tikv.run_status_server(in_memory_engine);
     tikv.core.init_quota_tuning_task(tikv.quota_limiter.clone());
 
-    // Build a background worker for handling signals.
-    {
+    tikv::server::local::set_ready(true);
+
+    // Build a background worker for handling signals. An embedding process
+    // owns signal handling and stops TiKV through the service event channel.
+    if !tikv::server::local::is_embedded() {
         // Clone rather than take the engines: `prepare_stop` still needs them
         // to disable manual compactions before the workers are stopped.
         let engines = tikv.engines.as_ref().unwrap().engines.clone();
@@ -234,6 +237,7 @@ fn run_impl<CER, F>(
             }
         }
     }
+    tikv::server::local::unregister();
     tikv.stop();
 }
 

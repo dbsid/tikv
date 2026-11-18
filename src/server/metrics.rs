@@ -262,6 +262,14 @@ lazy_static! {
         "tikv_gcworker_gc_key_failures",
         "Counter of gc key failures"
     ).unwrap();
+    /// Requests served in process for an embedding client (no gRPC).
+    pub static ref LOCAL_MSG_HISTOGRAM_VEC: HistogramVec = register_histogram_vec!(
+        "tikv_server_local_msg_duration_seconds",
+        "Bucketed histogram of requests served in process without gRPC",
+        &["type"],
+        exponential_buckets(5e-6, 2.0, 24).unwrap() // 5us ~ 42s
+    )
+    .unwrap();
     pub static ref GRPC_MSG_HISTOGRAM_VEC: HistogramVec = register_histogram_vec!(
         "tikv_grpc_msg_duration_seconds",
         "Bucketed histogram of grpc server messages",

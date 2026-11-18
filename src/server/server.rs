@@ -235,6 +235,8 @@ where
             raft_message_filter,
         );
 
+        crate::server::local::register(store_id, Box::new(kv_service.local_service()));
+
         let mem_quota = ResourceQuota::new(Some("ServerMemQuota"))
             .resize_memory(cfg.value().grpc_memory_pool_quota.0 as usize);
         let builder_factory = Box::new(BuilderFactory::new(

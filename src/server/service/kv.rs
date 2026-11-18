@@ -1318,6 +1318,99 @@ impl<E: Engine, L: LockManager, F: KvFormat> Tikv for Service<E, L, F> {
     }
 }
 
+/// Serves batch commands for an in-process client without gRPC.
+///
+/// It runs the same `handle_batch_commands_request` path as the
+/// `batch_commands` stream, so request validation, resource control, metrics
+/// and execution are unchanged; only the transport is removed. Requests are not
+/// merged by `ReqBatcher` because there is no stream to batch on.
+pub struct LocalService<E: Engine, L: LockManager, F: KvFormat> {
+    cluster_id: u64,
+    storage: Storage<E, L, F>,
+    copr: Endpoint<E>,
+    copr_v2: coprocessor_v2::Endpoint,
+    resource_manager: Option<Arc<ResourceGroupManager>>,
+}
+
+impl<E: Engine, L: LockManager, F: KvFormat> Clone for LocalService<E, L, F> {
+    fn clone(&self) -> Self {
+        LocalService {
+            cluster_id: self.cluster_id,
+            storage: self.storage.clone(),
+            copr: self.copr.clone(),
+            copr_v2: self.copr_v2.clone(),
+            resource_manager: self.resource_manager.clone(),
+        }
+    }
+}
+
+const LOCAL_PEER: &str = "local";
+
+impl<E: Engine, L: LockManager, F: KvFormat> Service<E, L, F> {
+    /// Builds the in-process entry point that shares this service's storage
+    /// and coprocessor.
+    pub fn local_service(&self) -> LocalService<E, L, F> {
+        LocalService {
+            cluster_id: self.cluster_id,
+            storage: self.storage.clone(),
+            copr: self.copr.clone(),
+            copr_v2: self.copr_v2.clone(),
+            resource_manager: self.resource_manager.clone(),
+        }
+    }
+}
+
+impl<E: Engine, L: LockManager, F: KvFormat> crate::server::local::LocalKvService
+    for LocalService<E, L, F>
+{
+    fn call(
+        &self,
+        req: batch_commands_request::Request,
+    ) -> futures::future::BoxFuture<'static, Result<batch_commands_response::Response, Error>>
+    {
+        let (tx, mut rx) = unbounded(WakePolicy::Immediately);
+        let mut batcher = None;
+        let res = handle_batch_commands_request(
+            self.cluster_id,
+            &mut batcher,
+            &self.storage,
+            &self.copr,
+            &self.copr_v2,
+            LOCAL_PEER,
+            0,
+            req,
+            &tx,
+            &self.resource_manager,
+        );
+        // Only the spawned request task holds a sender now, so the receiver
+        // ends if the task finishes without a response.
+        drop(tx);
+        async move {
+            res?;
+            let single = rx.next().await.ok_or_else(|| {
+                Error::Other(box_err!("local batch command finished without a response"))
+            })?;
+            let mut measured = MeasuredBatchResponse::default();
+            collect_batch_resp(&mut measured, single);
+            if let Some(err) = measured.server_err.take() {
+                return Err(err);
+            }
+            handle_measures_for_local(&mut measured);
+            Ok(measured
+                .batch_resp
+                .take_responses()
+                .into_iter()
+                .next()
+                .unwrap_or_default())
+        }
+        .boxed()
+    }
+
+    fn clone_box(&self) -> Box<dyn crate::server::local::LocalKvService> {
+        Box::new(self.clone())
+    }
+}
+
 fn response_batch_commands_request<F, T>(
     id: u64,
     resp: F,
@@ -1566,6 +1659,44 @@ fn handle_batch_commands_request<E: Engine, L: LockManager, F: KvFormat>(
     }
 
     Ok(())
+}
+
+/// Like `handle_measures_for_batch_commands`, but records the request in
+/// `tikv_server_local_msg_duration_seconds` instead of the gRPC histograms, so
+/// gRPC metrics only count requests that crossed the network.
+fn handle_measures_for_local(measures: &mut MeasuredBatchResponse) {
+    use BatchCommandsResponse_Response_oneof_cmd::*;
+    let now = Instant::now();
+    for (resp, measure) in measures
+        .batch_resp
+        .mut_responses()
+        .iter_mut()
+        .zip(mem::take(&mut measures.measures))
+    {
+        let elapsed = now.saturating_duration_since(measure.begin);
+        LOCAL_MSG_HISTOGRAM_VEC
+            .with_label_values(&[measure.label.get_str()])
+            .observe(elapsed.as_secs_f64());
+        record_request_source_metrics(measure.source, elapsed);
+        let exec_details = resp.cmd.as_mut().and_then(|cmd| match cmd {
+            Get(resp) => Some(resp.mut_exec_details_v2()),
+            Prewrite(resp) => Some(resp.mut_exec_details_v2()),
+            Commit(resp) => Some(resp.mut_exec_details_v2()),
+            BatchGet(resp) => Some(resp.mut_exec_details_v2()),
+            ResolveLock(resp) => Some(resp.mut_exec_details_v2()),
+            Coprocessor(resp) => Some(resp.mut_exec_details_v2()),
+            PessimisticLock(resp) => Some(resp.mut_exec_details_v2()),
+            CheckTxnStatus(resp) => Some(resp.mut_exec_details_v2()),
+            TxnHeartBeat(resp) => Some(resp.mut_exec_details_v2()),
+            CheckSecondaryLocks(resp) => Some(resp.mut_exec_details_v2()),
+            _ => None,
+        });
+        if let Some(exec_details) = exec_details {
+            let nanos = elapsed.as_nanos() as u64;
+            exec_details.mut_time_detail().set_total_rpc_wall_time_ns(nanos);
+            exec_details.mut_time_detail_v2().set_total_rpc_wall_time_ns(nanos);
+        }
+    }
 }
 
 fn handle_measures_for_batch_commands(measures: &mut MeasuredBatchResponse) {

@@ -1,0 +1,38 @@
+[package]
+name = "tikv-embed"
+version = "0.0.1"
+license = "Apache-2.0"
+edition = "2021"
+publish = false
+description = "TiKV as a static library with a C ABI, for embedding in another process"
+
+[lib]
+name = "tikv_embed"
+crate-type = ["staticlib", "rlib"]
+
+[features]
+default = ["test-engine-kv-rocksdb", "test-engine-raft-raft-engine"]
+jemalloc = ["server/jemalloc"]
+mem-profiling = ["server/mem-profiling"]
+portable = ["server/portable"]
+sse = ["server/sse"]
+failpoints = ["server/failpoints"]
+openssl-vendored = ["tikv/openssl-vendored"]
+test-engine-kv-rocksdb = ["server/test-engine-kv-rocksdb"]
+test-engine-raft-raft-engine = ["server/test-engine-raft-raft-engine"]
+nortcheck = ["server/nortcheck"]
+
+[dependencies]
+clap = { workspace = true }
+crypto = { workspace = true }
+futures = { version = "0.3", features = ["executor"] }
+kvproto = { workspace = true }
+protobuf = { version = "2.8", features = ["bytes"] }
+server = { workspace = true }
+service = { workspace = true }
+tikv = { workspace = true }
+tikv_util = { workspace = true }
+
+[build-dependencies]
+cc = "1.0"
+time = { workspace = true }

@@ -8553,6 +8553,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "tikv-embed"
+version = "0.0.1"
+dependencies = [
+ "cc",
+ "clap 2.33.0",
+ "crypto",
+ "futures 0.3.32",
+ "kvproto",
+ "protobuf 2.8.0",
+ "server",
+ "service",
+ "tikv",
+ "tikv_util",
+ "time 0.2.27",
+]
+
+[[package]]
 name = "tikv-jemalloc-ctl"
 version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
