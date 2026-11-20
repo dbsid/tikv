@@ -32,7 +32,6 @@ server = { workspace = true }
 service = { workspace = true }
 tikv = { workspace = true }
 tikv_util = { workspace = true }
-tokio = { version = "1.17", features = ["rt-multi-thread"] }
 
 [build-dependencies]
 cc = "1.0"

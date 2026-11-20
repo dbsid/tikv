@@ -19,9 +19,8 @@ use std::{
         Mutex,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
+    time::Duration,
 };
-
-use std::time::Duration;
 
 use futures::future::BoxFuture;
 use kvproto::{
