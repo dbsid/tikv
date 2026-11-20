@@ -578,7 +578,7 @@ mod tests {
         // Answered within the wait: synchronous, no callback.
         let (rc, data) = submit(&req, 4, 5_000_000);
         assert_eq!(rc, TIKV_EMBED_OK);
-        let resp = BatchCommandsResponseResponse::parse_from_bytes(&data).unwrap();
+        let resp = protobuf::parse_from_bytes::<BatchCommandsResponseResponse>(&data).unwrap();
         assert_eq!(resp.get_get().get_value(), b"v");
 
         // Not answered within the wait: the callback follows once.
@@ -601,7 +601,7 @@ mod tests {
         assert_eq!(tokens, (10..20).collect::<Vec<_>>());
         for (_, code, data) in done.iter() {
             assert_eq!(*code, TIKV_EMBED_OK);
-            let resp = BatchCommandsResponseResponse::parse_from_bytes(data).unwrap();
+            let resp = protobuf::parse_from_bytes::<BatchCommandsResponseResponse>(data).unwrap();
             assert_eq!(resp.get_get().get_value(), b"v");
         }
         drop(done);
