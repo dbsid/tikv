@@ -4,11 +4,14 @@
 //!
 //! The host process (for example `tidb-one-server`, a TiDB build that links
 //! this library through cgo) starts TiKV on a background thread with
-//! [`tikv_embed_start`], waits for it with [`tikv_embed_wait_ready`], and then
-//! sends requests for the local store through [`tikv_embed_call`]. A request is
-//! a protobuf-encoded `tikvpb.BatchCommandsRequest.Request`; the response is a
-//! protobuf-encoded `tikvpb.BatchCommandsResponse.Response`. TiKV still serves
-//! gRPC for remote clients, PD and Raft peers.
+//! [`tikv_embed_start`], waits for it with [`tikv_embed_wait_ready`], installs
+//! a completion callback with [`tikv_embed_set_done`], and then sends requests
+//! for the local store through [`tikv_embed_submit`]. A request is a
+//! protobuf-encoded `tikvpb.BatchCommandsRequest.Request`; the response is a
+//! protobuf-encoded `tikvpb.BatchCommandsResponse.Response`, delivered to the
+//! callback from a TiKV thread. No host thread waits for TiKV, so the host can
+//! give up on a request (cancellation, timeout) and many requests can be in
+//! flight. TiKV still serves gRPC for remote clients, PD and Raft peers.
 //!
 //! The C declarations are in `include/tikv_embed.h`.
 
@@ -17,7 +20,7 @@ use std::{
     panic::{AssertUnwindSafe, catch_unwind},
     path::Path,
     sync::{
-        Mutex,
+        Mutex, OnceLock,
         atomic::{AtomicU8, Ordering},
     },
     thread::JoinHandle,
@@ -26,6 +29,7 @@ use std::{
 
 use clap::{App, Arg, ArgMatches};
 use crypto::fips;
+use futures::FutureExt;
 use kvproto::tikvpb::BatchCommandsRequestRequest;
 use protobuf::Message;
 use tikv::{config::TikvConfig, server::local, storage::config::EngineType};
@@ -214,31 +218,62 @@ fn into_raw(buf: Vec<u8>, out: *mut *mut u8, out_len: *mut usize) {
     }
 }
 
-/// Executes one encoded `BatchCommandsRequest.Request` against the local store
-/// and blocks the calling thread until the response is ready.
+/// Completion callback of [`tikv_embed_submit`]: `token` identifies the
+/// request, `code` is `TIKV_EMBED_OK` (`resp` holds an encoded
+/// `BatchCommandsResponse.Response`) or `TIKV_EMBED_ERROR` (`resp` holds a
+/// UTF-8 error message). The callee owns `resp` and releases it with
+/// [`tikv_embed_free`]. It runs on a TiKV thread and must not block.
+pub type DoneFn = extern "C" fn(token: u64, code: i32, resp: *mut u8, resp_len: usize);
+
+static DONE: OnceLock<DoneFn> = OnceLock::new();
+
+/// Threads that wait for local responses, encode them and run the callback.
+/// The requests themselves run on TiKV's pools.
+const COMPLETION_THREADS: usize = 4;
+
+fn completion_runtime() -> &'static tokio::runtime::Runtime {
+    static RT: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
+    RT.get_or_init(|| {
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(COMPLETION_THREADS)
+            .thread_name("tikv-embed-done")
+            .build()
+            .expect("tikv-embed: build completion runtime")
+    })
+}
+
+/// Installs the completion callback for [`tikv_embed_submit`]. Only the first
+/// call has an effect.
+#[unsafe(no_mangle)]
+pub extern "C" fn tikv_embed_set_done(done: DoneFn) {
+    let _ = DONE.set(done);
+}
+
+fn complete(done: DoneFn, token: u64, code: i32, buf: Vec<u8>) {
+    let boxed = buf.into_boxed_slice();
+    let len = boxed.len();
+    let ptr = Box::into_raw(boxed) as *mut u8;
+    done(token, code, ptr, len);
+}
+
+/// Starts one encoded `BatchCommandsRequest.Request` on the local store and
+/// returns without waiting for it.
 ///
-/// On `TIKV_EMBED_OK`, `*resp` holds an encoded `BatchCommandsResponse.Response`.
-/// On `TIKV_EMBED_ERROR` or `TIKV_EMBED_BAD_REQUEST`, `*resp` holds a UTF-8
-/// error message. In both cases release it with [`tikv_embed_free`]. On
-/// `TIKV_EMBED_UNAVAILABLE` nothing is returned and the caller should use
-/// gRPC.
+/// On `TIKV_EMBED_OK` the request is accepted and the callback installed by
+/// [`tikv_embed_set_done`] is called exactly once with `token`, possibly
+/// before this function returns. Any other code means the request was not
+/// accepted and the callback is not called: `TIKV_EMBED_UNAVAILABLE` (use
+/// gRPC; also returned before a callback is installed) or
+/// `TIKV_EMBED_BAD_REQUEST` (the request does not decode).
 ///
 /// # Safety
 ///
-/// `req` must point to `req_len` readable bytes; `resp` and `resp_len` must be
-/// writable.
+/// `req` must point to `req_len` readable bytes during the call.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn tikv_embed_call(
-    req: *const u8,
-    req_len: usize,
-    resp: *mut *mut u8,
-    resp_len: *mut usize,
-) -> i32 {
-    // SAFETY: guaranteed by the caller.
-    unsafe {
-        *resp = std::ptr::null_mut();
-        *resp_len = 0;
-    }
+pub unsafe extern "C" fn tikv_embed_submit(req: *const u8, req_len: usize, token: u64) -> i32 {
+    let Some(&done) = DONE.get() else {
+        return TIKV_EMBED_UNAVAILABLE;
+    };
     if !local::is_ready() {
         return TIKV_EMBED_UNAVAILABLE;
     }
@@ -249,48 +284,69 @@ pub unsafe extern "C" fn tikv_embed_call(
         unsafe { std::slice::from_raw_parts(req, req_len) }
     };
     let mut request = BatchCommandsRequestRequest::new();
-    match request.merge_from_bytes(bytes) {
-        Ok(()) => {}
-        Err(e) => {
-            into_raw(format!("decode request: {e}").into_bytes(), resp, resp_len);
-            return TIKV_EMBED_BAD_REQUEST;
-        }
-    };
-    let result = catch_unwind(AssertUnwindSafe(|| {
-        local::call(request).map(futures::executor::block_on)
-    }));
-    let result = match result {
-        Ok(None) => return TIKV_EMBED_UNAVAILABLE,
-        Ok(Some(r)) => Ok(r),
-        Err(e) => Err(e),
-    };
-    match result {
-        Ok(Ok(response)) => match response.write_to_bytes() {
-            Ok(buf) => {
-                into_raw(buf, resp, resp_len);
-                TIKV_EMBED_OK
-            }
-            Err(e) => {
-                into_raw(format!("encode response: {e}").into_bytes(), resp, resp_len);
-                TIKV_EMBED_ERROR
-            }
-        },
-        Ok(Err(e)) => {
-            into_raw(e.to_string().into_bytes(), resp, resp_len);
-            TIKV_EMBED_ERROR
-        }
-        Err(_) => {
-            into_raw(b"local request panicked".to_vec(), resp, resp_len);
-            TIKV_EMBED_ERROR
-        }
+    if request.merge_from_bytes(bytes).is_err() {
+        return TIKV_EMBED_BAD_REQUEST;
     }
+    let fut = match catch_unwind(AssertUnwindSafe(|| local::call(request))) {
+        Ok(Some(fut)) => fut,
+        Ok(None) => return TIKV_EMBED_UNAVAILABLE,
+        Err(_) => return TIKV_EMBED_ERROR,
+    };
+    completion_runtime().spawn(async move {
+        let (code, buf) = match AssertUnwindSafe(fut).catch_unwind().await {
+            Ok(Ok(response)) => match response.write_to_bytes() {
+                Ok(buf) => (TIKV_EMBED_OK, buf),
+                Err(e) => (TIKV_EMBED_ERROR, format!("encode response: {e}").into_bytes()),
+            },
+            Ok(Err(e)) => (TIKV_EMBED_ERROR, e.to_string().into_bytes()),
+            Err(_) => (TIKV_EMBED_ERROR, b"local request panicked".to_vec()),
+        };
+        complete(done, token, code, buf);
+    });
+    TIKV_EMBED_OK
 }
 
-/// Releases a buffer returned by [`tikv_embed_call`].
+/// Writes the local store's health feedback, an encoded
+/// `kvrpcpb.HealthFeedback`, to `*out` (release it with [`tikv_embed_free`])
+/// and the interval in milliseconds after which to ask again to
+/// `*interval_ms`. Returns `TIKV_EMBED_UNAVAILABLE` if the store is not ready
+/// or health feedback is disabled (`server.health-feedback-interval = 0`).
 ///
 /// # Safety
 ///
-/// `ptr` and `len` must come from one `tikv_embed_call` output.
+/// `out`, `out_len` and `interval_ms` must be writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tikv_embed_health_feedback(
+    out: *mut *mut u8,
+    out_len: *mut usize,
+    interval_ms: *mut u64,
+) -> i32 {
+    // SAFETY: guaranteed by the caller.
+    unsafe {
+        *out = std::ptr::null_mut();
+        *out_len = 0;
+        *interval_ms = 0;
+    }
+    let Ok(Some((feedback, interval))) = catch_unwind(local::health_feedback) else {
+        return TIKV_EMBED_UNAVAILABLE;
+    };
+    match feedback.write_to_bytes() {
+        Ok(buf) => {
+            into_raw(buf, out, out_len);
+            // SAFETY: guaranteed by the caller.
+            unsafe { *interval_ms = interval.as_millis() as u64 };
+            TIKV_EMBED_OK
+        }
+        Err(_) => TIKV_EMBED_ERROR,
+    }
+}
+
+/// Releases a buffer passed to the completion callback or returned by
+/// [`tikv_embed_health_feedback`].
+///
+/// # Safety
+///
+/// `ptr` and `len` must come from one of those buffers.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn tikv_embed_free(ptr: *mut u8, len: usize) {
     if ptr.is_null() {

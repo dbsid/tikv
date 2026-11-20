@@ -1323,23 +1323,36 @@ impl<E: Engine, L: LockManager, F: KvFormat> Tikv for Service<E, L, F> {
 /// It runs the same `handle_batch_commands_request` path as the
 /// `batch_commands` stream, so request validation, resource control, metrics
 /// and execution are unchanged; only the transport is removed. Requests are not
-/// merged by `ReqBatcher` because there is no stream to batch on.
+/// merged by `ReqBatcher`: it only merges requests that arrive in one
+/// `BatchCommandsRequest`, and a local call carries one request.
+///
+/// Health feedback, which the stream attaches to its responses, is available
+/// through [`LocalKvService::health_feedback`]; it shares the sequence number
+/// with the gRPC service so the client orders both sources.
 pub struct LocalService<E: Engine, L: LockManager, F: KvFormat> {
     cluster_id: u64,
+    store_id: u64,
     storage: Storage<E, L, F>,
     copr: Endpoint<E>,
     copr_v2: coprocessor_v2::Endpoint,
     resource_manager: Option<Arc<ResourceGroupManager>>,
+    health_controller: HealthController,
+    health_feedback_seq: Arc<AtomicU64>,
+    health_feedback_interval: Option<Duration>,
 }
 
 impl<E: Engine, L: LockManager, F: KvFormat> Clone for LocalService<E, L, F> {
     fn clone(&self) -> Self {
         LocalService {
             cluster_id: self.cluster_id,
+            store_id: self.store_id,
             storage: self.storage.clone(),
             copr: self.copr.clone(),
             copr_v2: self.copr_v2.clone(),
             resource_manager: self.resource_manager.clone(),
+            health_controller: self.health_controller.clone(),
+            health_feedback_seq: self.health_feedback_seq.clone(),
+            health_feedback_interval: self.health_feedback_interval,
         }
     }
 }
@@ -1352,10 +1365,14 @@ impl<E: Engine, L: LockManager, F: KvFormat> Service<E, L, F> {
     pub fn local_service(&self) -> LocalService<E, L, F> {
         LocalService {
             cluster_id: self.cluster_id,
+            store_id: self.store_id,
             storage: self.storage.clone(),
             copr: self.copr.clone(),
             copr_v2: self.copr_v2.clone(),
             resource_manager: self.resource_manager.clone(),
+            health_controller: self.health_controller.clone(),
+            health_feedback_seq: self.health_feedback_seq.clone(),
+            health_feedback_interval: self.health_feedback_interval,
         }
     }
 }
@@ -1408,6 +1425,18 @@ impl<E: Engine, L: LockManager, F: KvFormat> crate::server::local::LocalKvServic
 
     fn clone_box(&self) -> Box<dyn crate::server::local::LocalKvService> {
         Box::new(self.clone())
+    }
+
+    fn health_feedback(&self) -> Option<(HealthFeedback, Duration)> {
+        let interval = self.health_feedback_interval?;
+        let attacher = HealthFeedbackAttacher::new(
+            self.store_id,
+            self.health_controller.clone(),
+            self.health_feedback_seq.clone(),
+            Some(interval),
+            self.resource_manager.clone(),
+        );
+        Some((attacher.gen_health_feedback_pb(), interval))
     }
 }
 
