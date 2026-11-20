@@ -30,12 +30,33 @@ int32_t tikv_embed_wait_ready(uint64_t timeout_ms);
 // Returns the local store ID, or 0 before it is known.
 uint64_t tikv_embed_store_id(void);
 
-// Executes an encoded tikvpb.BatchCommandsRequest.Request. On TIKV_EMBED_OK
-// *resp holds an encoded tikvpb.BatchCommandsResponse.Response; on
-// TIKV_EMBED_ERROR / TIKV_EMBED_BAD_REQUEST it holds an error message. Release
-// *resp with tikv_embed_free. TIKV_EMBED_UNAVAILABLE means "use gRPC".
-int32_t tikv_embed_call(const uint8_t *req, size_t req_len, uint8_t **resp,
-                        size_t *resp_len);
+#define TIKV_EMBED_PENDING 7
+
+// Completion callback of tikv_embed_submit for requests that did not finish
+// within the synchronous wait. code is TIKV_EMBED_OK (resp holds an encoded
+// tikvpb.BatchCommandsResponse.Response) or TIKV_EMBED_ERROR (resp holds an
+// error message). The callee releases resp with tikv_embed_free. It runs on a
+// TiKV thread and must not block.
+typedef void (*tikv_embed_done_fn)(uint64_t token, int32_t code, uint8_t *resp,
+                                   size_t resp_len);
+
+// Installs the completion callback. Only the first call has an effect.
+void tikv_embed_set_done(tikv_embed_done_fn done);
+
+// Starts an encoded tikvpb.BatchCommandsRequest.Request and waits at most
+// wait_us for it. TIKV_EMBED_OK / TIKV_EMBED_ERROR: finished; *resp holds the
+// response or an error message (release with tikv_embed_free), no callback.
+// TIKV_EMBED_PENDING: the callback is called exactly once with token.
+// TIKV_EMBED_UNAVAILABLE ("use gRPC", also before a callback is installed) and
+// TIKV_EMBED_BAD_REQUEST: not accepted, no callback.
+int32_t tikv_embed_submit(const uint8_t *req, size_t req_len, uint64_t token,
+                          uint64_t wait_us, uint8_t **resp, size_t *resp_len);
+
+// Writes the local store's health feedback (an encoded kvrpcpb.HealthFeedback,
+// release with tikv_embed_free) and the interval to ask again. Returns
+// TIKV_EMBED_UNAVAILABLE if the store is not ready or feedback is disabled.
+int32_t tikv_embed_health_feedback(uint8_t **out, size_t *out_len,
+                                   uint64_t *interval_ms);
 
 void tikv_embed_free(uint8_t *ptr, size_t len);
 

@@ -19,10 +19,14 @@ use std::{
         Mutex,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
+    time::Duration,
 };
 
 use futures::future::BoxFuture;
-use kvproto::tikvpb::{BatchCommandsRequestRequest, BatchCommandsResponseResponse};
+use kvproto::{
+    kvrpcpb::HealthFeedback,
+    tikvpb::{BatchCommandsRequestRequest, BatchCommandsResponseResponse},
+};
 
 use super::Error;
 
@@ -39,6 +43,13 @@ pub trait LocalKvService: Send {
 
     /// Clones the service for use on another thread.
     fn clone_box(&self) -> Box<dyn LocalKvService>;
+
+    /// The store's health feedback (as the batch-commands stream attaches it
+    /// to responses) and the interval at which the client should ask again,
+    /// or `None` if health feedback is disabled.
+    fn health_feedback(&self) -> Option<(HealthFeedback, Duration)> {
+        None
+    }
 }
 
 static EMBEDDED: AtomicBool = AtomicBool::new(false);
@@ -95,6 +106,16 @@ pub fn store_id() -> u64 {
 pub fn call(
     req: BatchCommandsRequestRequest,
 ) -> Option<BoxFuture<'static, Result<BatchCommandsResponseResponse, Error>>> {
+    with_service(|s| s.call(req))
+}
+
+/// Returns the local store's health feedback and the interval to ask again,
+/// or `None` if no service is ready or health feedback is disabled.
+pub fn health_feedback() -> Option<(HealthFeedback, Duration)> {
+    with_service(|s| s.health_feedback()).flatten()
+}
+
+fn with_service<T>(f: impl FnOnce(&dyn LocalKvService) -> T) -> Option<T> {
     if !READY.load(Ordering::Acquire) {
         return None;
     }
@@ -106,7 +127,7 @@ pub fn call(
             let service = SERVICE.lock().unwrap().as_ref().map(|s| s.clone_box());
             *cached = service.map(|s| (generation, s));
         }
-        cached.as_ref().map(|(_, s)| s.call(req))
+        cached.as_ref().map(|(_, s)| f(s.as_ref()))
     })
 }
 
