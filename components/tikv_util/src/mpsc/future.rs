@@ -161,8 +161,18 @@ impl<T: Send> Stream for Receiver<T> {
         if let Some(t) = queue.queue.pop_front() {
             return Poll::Ready(Some(t));
         }
+        fail::fail_point!("future_mpsc_before_liveness_check");
         if queue.liveness.load(Ordering::Acquire) & !RECEIVER_COUNT_BASE != 0 {
             return Poll::Pending;
+        }
+        // The last sender may have pushed a message after the pop above and
+        // then been dropped before the liveness load. Its push happens before
+        // its `Release` decrement, which this `Acquire` load observed, so one
+        // more pop sees the message. Without it a channel whose only sender
+        // sends and drops right away (one response per local KV call) can end
+        // without its message.
+        if let Some(t) = queue.queue.pop_front() {
+            return Poll::Ready(Some(t));
         }
         Poll::Ready(None)
     }
@@ -177,6 +187,11 @@ impl<T: Send> Receiver<T> {
         }
         if queue.liveness.load(Ordering::Acquire) & !RECEIVER_COUNT_BASE != 0 {
             return Err(TryRecvError::Empty);
+        }
+        // See `poll_next`: a message sent right before the last sender was
+        // dropped may not have been visible to the first pop.
+        if let Some(t) = queue.queue.pop_front() {
+            return Ok(t);
         }
         Err(TryRecvError::Disconnected)
     }
@@ -492,6 +507,30 @@ mod tests {
         tx1.send(SetOnDrop::default()).unwrap_err();
         drop(tx1);
         assert!(dropped.load(Ordering::SeqCst));
+    }
+
+    // The only sender sends and is dropped between the receiver's last pop
+    // and its liveness check (a local KV call: one response task per channel).
+    #[cfg(feature = "failpoints")]
+    #[test]
+    fn test_message_sent_by_last_sender_before_drop_is_received() {
+        let fp = "future_mpsc_before_liveness_check";
+        let (tx, mut rx) = super::unbounded(WakePolicy::Immediately);
+        let tx = Arc::new(Mutex::new(Some(tx)));
+        let tx1 = tx.clone();
+        fail::cfg_callback(fp, move || {
+            if let Some(tx) = tx1.lock().unwrap().take() {
+                tx.send(7).unwrap();
+            }
+        })
+        .unwrap();
+        let waker = futures::task::noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        let polled = Pin::new(&mut rx).poll_next(&mut cx);
+        fail::remove(fp);
+        assert_eq!(polled, Poll::Ready(Some(7)));
+        assert_eq!(Pin::new(&mut rx).poll_next(&mut cx), Poll::Ready(None));
+        drop(tx);
     }
 
     #[test]
