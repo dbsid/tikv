@@ -112,7 +112,9 @@ synchronous returns and asynchronous callbacks. Read stages use the scan and
 time details. Transactional write stages use the scheduler and Raft timings in
 the write detail. An early response may precede apply, and persist and commit
 can overlap. Stage counts therefore depend on what each response reports.
-The TiKV status port exposes both the local and gRPC histograms.
+The TiKV status port exposes both the local and gRPC histograms. In TiKV-Details,
+open **Local KV (FFI)** directly below **gRPC** to compare request rates and
+service latency, then inspect the read and write stages for the selected stores.
 
 ### Server runtime
 
