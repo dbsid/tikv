@@ -107,7 +107,7 @@ use tikv_util::{
     future::try_poll,
     quota_limiter::QuotaLimiter,
     resource_control::group_label,
-    time::{Instant, InstantExt, ThreadReadId, duration_to_ms, duration_to_sec},
+    time::{Instant, InstantExt, ThreadReadId, duration_to_sec},
 };
 use tracker::{
     TlsTrackedFuture, TrackerToken, clear_tls_tracker_token, set_tls_tracker_token,
@@ -1281,10 +1281,10 @@ impl<E: Engine, L: LockManager, F: KvFormat> Storage<E, L, F> {
                             schedule_wait_time.as_nanos() as u64;
                     });
                     let latency_stats = StageLatencyStats {
-                        schedule_wait_time_ns: duration_to_ms(schedule_wait_time),
-                        snapshot_wait_time_ns: duration_to_ms(snapshot_wait_time),
-                        wait_wall_time_ns: duration_to_ms(wait_wall_time),
-                        process_wall_time_ns: duration_to_ms(process_wall_time),
+                        schedule_wait_time_ns: schedule_wait_time.as_nanos() as u64,
+                        snapshot_wait_time_ns: snapshot_wait_time.as_nanos() as u64,
+                        wait_wall_time_ns: wait_wall_time.as_nanos() as u64,
+                        process_wall_time_ns: process_wall_time.as_nanos() as u64,
                     };
                     Ok((
                         result,
@@ -1504,10 +1504,10 @@ impl<E: Engine, L: LockManager, F: KvFormat> Storage<E, L, F> {
                             schedule_wait_time.as_nanos() as u64;
                     });
                     let latency_stats = StageLatencyStats {
-                        schedule_wait_time_ns: duration_to_ms(schedule_wait_time),
-                        snapshot_wait_time_ns: duration_to_ms(snapshot_wait_time),
-                        wait_wall_time_ns: duration_to_ms(wait_wall_time),
-                        process_wall_time_ns: duration_to_ms(process_wall_time),
+                        schedule_wait_time_ns: schedule_wait_time.as_nanos() as u64,
+                        snapshot_wait_time_ns: snapshot_wait_time.as_nanos() as u64,
+                        wait_wall_time_ns: wait_wall_time.as_nanos() as u64,
+                        process_wall_time_ns: process_wall_time.as_nanos() as u64,
                     };
                     record_logical_read_bytes(stats.processed_size as u64);
                     Ok((
