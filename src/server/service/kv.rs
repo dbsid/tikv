@@ -1383,7 +1383,8 @@ impl<E: Engine, L: LockManager, F: KvFormat> crate::server::local::LocalKvServic
     fn call(
         &self,
         req: batch_commands_request::Request,
-    ) -> futures::future::BoxFuture<'static, Result<batch_commands_response::Response, Error>> {
+    ) -> futures::future::BoxFuture<'static, Result<batch_commands_response::Response, Error>>
+    {
         let (tx, mut rx) = unbounded(WakePolicy::Immediately);
         let mut batcher = None;
         let res = handle_batch_commands_request(
@@ -1724,6 +1725,10 @@ fn observe_local_request_stages(label: GrpcTypeKind, details: &ExecDetailsV2) {
             };
             let write = details.get_write_detail();
             observe(&stages.latch_wait, write.get_latch_wait_nanos());
+            observe(
+                &stages.pessimistic_lock_wait,
+                write.get_pessimistic_lock_wait_nanos(),
+            );
             observe(&stages.scheduler_process, write.get_process_nanos());
             observe(&stages.persist_log, write.get_persist_log_nanos());
             observe(&stages.commit_log, write.get_commit_log_nanos());
@@ -1757,7 +1762,12 @@ fn handle_measures_for_local(measures: &mut MeasuredBatchResponse) {
             Commit(resp) => Some(resp.mut_exec_details_v2()),
             BatchGet(resp) => Some(resp.mut_exec_details_v2()),
             ResolveLock(resp) => Some(resp.mut_exec_details_v2()),
-            Coprocessor(resp) => Some(resp.mut_exec_details_v2()),
+            Coprocessor(resp) => {
+                for task in resp.get_batch_responses() {
+                    observe_local_request_stages(measure.label, task.get_exec_details_v2());
+                }
+                Some(resp.mut_exec_details_v2())
+            }
             PessimisticLock(resp) => Some(resp.mut_exec_details_v2()),
             CheckTxnStatus(resp) => Some(resp.mut_exec_details_v2()),
             TxnHeartBeat(resp) => Some(resp.mut_exec_details_v2()),
@@ -1767,12 +1777,8 @@ fn handle_measures_for_local(measures: &mut MeasuredBatchResponse) {
         if let Some(exec_details) = exec_details {
             observe_local_request_stages(measure.label, exec_details);
             let nanos = elapsed.as_nanos() as u64;
-            exec_details
-                .mut_time_detail()
-                .set_total_rpc_wall_time_ns(nanos);
-            exec_details
-                .mut_time_detail_v2()
-                .set_total_rpc_wall_time_ns(nanos);
+            exec_details.mut_time_detail().set_total_rpc_wall_time_ns(nanos);
+            exec_details.mut_time_detail_v2().set_total_rpc_wall_time_ns(nanos);
         }
     }
 }
@@ -3068,6 +3074,89 @@ mod tests {
     use tikv_util::sys::thread::StdThreadBuildWrapper;
 
     use super::*;
+
+    #[test]
+    fn test_local_request_stages() {
+        let mut details = ExecDetailsV2::default();
+        let write = details.mut_write_detail();
+        write.set_latch_wait_nanos(250_000);
+        write.set_pessimistic_lock_wait_nanos(30_000_000_000);
+        write.set_process_nanos(50_000);
+        write.set_persist_log_nanos(100_000);
+        write.set_commit_log_nanos(200_000);
+        write.set_apply_batch_wait_nanos(400_000);
+        write.set_apply_log_nanos(800_000);
+
+        let stages = &LOCAL_WRITE_STAGES.kv_pessimistic_lock;
+        let expected = [
+            (&stages.latch_wait, 250_000),
+            (&stages.pessimistic_lock_wait, 30_000_000_000),
+            (&stages.scheduler_process, 50_000),
+            (&stages.persist_log, 100_000),
+            (&stages.commit_log, 200_000),
+            (&stages.apply_wait, 400_000),
+            (&stages.apply_log, 800_000),
+        ];
+        let before = expected.map(|(hist, _)| (hist.get_sample_count(), hist.get_sample_sum()));
+        observe_local_request_stages(GrpcTypeKind::kv_pessimistic_lock, &details);
+        observe_local_request_stages(GrpcTypeKind::kv_pessimistic_lock, &ExecDetailsV2::default());
+        for ((hist, nanos), (count, sum)) in expected.into_iter().zip(before) {
+            assert_eq!(hist.get_sample_count(), count + 1);
+            assert!((hist.get_sample_sum() - sum - nanos_to_secs(nanos)).abs() < 1e-9);
+        }
+    }
+
+    #[test]
+    fn test_local_coprocessor_includes_store_batch_tasks() {
+        let stages = &LOCAL_READ_STAGES.coprocessor;
+        let before = stages.read_process.get_sample_count();
+        let before_sum = stages.read_process.get_sample_sum();
+        let mut resp = batch_commands_response::Response::default();
+        let cop = resp.mut_coprocessor();
+        cop.mut_exec_details_v2()
+            .mut_time_detail_v2()
+            .set_process_wall_time_ns(10_000);
+        let mut child = kvproto::coprocessor::StoreBatchTaskResponse::default();
+        child
+            .mut_exec_details_v2()
+            .mut_time_detail_v2()
+            .set_process_wall_time_ns(500_000);
+        cop.mut_batch_responses().push(child);
+        let mut batch = MeasuredBatchResponse::default();
+        batch.batch_resp.mut_responses().push(resp);
+        batch.measures.push(GrpcRequestDuration::new(
+            Instant::now(),
+            GrpcTypeKind::coprocessor,
+            String::new(),
+            ResourcePriority::unknown,
+            DEFAULT_RESOURCE_GROUP_NAME.to_owned(),
+        ));
+        handle_measures_for_local(&mut batch);
+        assert_eq!(stages.read_process.get_sample_count(), before + 2);
+        assert!((stages.read_process.get_sample_sum() - before_sum - 0.00051).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_submillisecond_read_execution_details() {
+        let stats = StageLatencyStats::from_durations(
+            Duration::from_micros(100),
+            Duration::from_micros(150),
+            Duration::from_micros(250),
+            Duration::from_micros(350),
+        );
+        let mut details = ExecDetailsV2::default();
+        set_time_detail(&mut details, Duration::from_micros(600), &stats);
+        assert_eq!(stats.schedule_wait_time_ns, 100_000);
+        assert_eq!(stats.snapshot_wait_time_ns, 150_000);
+        assert_eq!(
+            details.get_time_detail_v2().get_wait_wall_time_ns(),
+            250_000
+        );
+        assert_eq!(
+            details.get_time_detail_v2().get_process_wall_time_ns(),
+            350_000
+        );
+    }
 
     #[test]
     fn test_kv_get_sets_ru_v2_processed_keys() {

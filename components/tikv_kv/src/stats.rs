@@ -1,6 +1,6 @@
 // Copyright 2019 TiKV Project Authors. Licensed under Apache-2.0.
 
-use std::cell::RefCell;
+use std::{cell::RefCell, time::Duration};
 
 use engine_traits::{CF_DEFAULT, CF_LOCK, CF_WRITE, IterMetricsCollector};
 use kvproto::kvrpcpb::{ScanDetail, ScanDetailV2, ScanInfo};
@@ -355,4 +355,20 @@ pub struct StageLatencyStats {
     pub snapshot_wait_time_ns: u64,
     pub wait_wall_time_ns: u64,
     pub process_wall_time_ns: u64,
+}
+
+impl StageLatencyStats {
+    pub fn from_durations(
+        schedule_wait: Duration,
+        snapshot_wait: Duration,
+        wait: Duration,
+        process: Duration,
+    ) -> Self {
+        Self {
+            schedule_wait_time_ns: schedule_wait.as_nanos() as u64,
+            snapshot_wait_time_ns: snapshot_wait.as_nanos() as u64,
+            wait_wall_time_ns: wait.as_nanos() as u64,
+            process_wall_time_ns: process.as_nanos() as u64,
+        }
+    }
 }

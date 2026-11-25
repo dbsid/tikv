@@ -181,7 +181,7 @@ make_static_metric! {
 
     pub struct LocalWriteStages: Histogram {
         "type" => { kv_prewrite, kv_commit, kv_pessimistic_lock },
-        "stage" => { latch_wait, scheduler_process, persist_log, commit_log, apply_wait, apply_log },
+        "stage" => { latch_wait, pessimistic_lock_wait, scheduler_process, persist_log, commit_log, apply_wait, apply_log },
     }
 
     pub label_enum GlobalGrpcTypeKind {
@@ -286,7 +286,7 @@ lazy_static! {
         "tikv_server_local_request_stage_duration_seconds",
         "Nonzero stage durations from local KV response execution details",
         &["type", "stage"],
-        exponential_buckets(1e-6, 2.0, 24).unwrap()
+        exponential_buckets(1e-6, 2.0, 27).unwrap() // 1us ~ 67s
     )
     .unwrap();
     pub static ref LOCAL_READ_STAGES: LocalReadStages = LocalReadStages::from(&LOCAL_REQUEST_STAGES);
