@@ -84,7 +84,9 @@ impl Tracker {
                 .saturating_sub(self.metrics.wf_send_to_queue_nanos),
         );
         detail.set_persist_log_nanos(
-            self.metrics.wf_persist_log_nanos - self.metrics.wf_send_to_queue_nanos,
+            self.metrics
+                .wf_persist_log_nanos
+                .saturating_sub(self.metrics.wf_send_to_queue_nanos),
         );
         detail.set_raft_db_write_leader_wait_nanos(
             self.metrics.store_mutex_lock_nanos + self.metrics.store_thread_wait_nanos,
@@ -95,7 +97,9 @@ impl Tracker {
         // And note that the time before flushing the raft message to the RPC channel is
         // also counted in this value (to be improved in the future).
         detail.set_commit_log_nanos(
-            self.metrics.wf_commit_log_nanos - self.metrics.wf_batch_wait_nanos,
+            self.metrics
+                .wf_commit_log_nanos
+                .saturating_sub(self.metrics.wf_batch_wait_nanos),
         );
         detail.set_apply_batch_wait_nanos(self.metrics.apply_wait_nanos);
         // When async_prewrite_apply is set, the `apply_time_nanos` could be less than
@@ -285,6 +289,21 @@ mod tests {
             request_type: RequestType::default(),
             cid: 0,
             is_external_req: false,
+        }
+    }
+
+    #[test]
+    fn test_raft_write_durations_at_response_time() {
+        let mut tracker = Tracker::new(new_req_info());
+        tracker.metrics.wf_send_to_queue_nanos = 40;
+        tracker.metrics.wf_batch_wait_nanos = 25;
+        let mut detail = pb::WriteDetail::default();
+        for (end, persist, commit) in [(0, 0, 0), (10, 0, 0), (60, 20, 35)] {
+            tracker.metrics.wf_persist_log_nanos = end;
+            tracker.metrics.wf_commit_log_nanos = end;
+            tracker.write_write_detail(&mut detail);
+            assert_eq!(detail.get_persist_log_nanos(), persist);
+            assert_eq!(detail.get_commit_log_nanos(), commit);
         }
     }
 

@@ -1121,7 +1121,7 @@ impl<E: Engine, L: LockManager> TxnScheduler<E, L> {
         let wait_token = self.inner.lock_mgr.allocate_token();
 
         let (lock_req_ctx, lock_wait_entry, lock_info_pb) =
-            self.make_lock_waiting(cid, wait_token, lock_info);
+            self.make_lock_waiting(cid, wait_token, lock_info, diag_ctx.tracker);
 
         // The entry must be pushed to the lock waiting queue before sending to
         // `lock_mgr`. When the request is canceled in anywhere outside the lock
@@ -2248,6 +2248,7 @@ impl<E: Engine, L: LockManager> TxnScheduler<E, L> {
         cid: u64,
         lock_wait_token: LockWaitToken,
         lock_info: WriteResultLockInfo,
+        tracker: TrackerToken,
     ) -> (LockWaitContext<L>, Box<LockWaitEntry>, kvrpcpb::LockInfo) {
         let mut slot = self.inner.get_task_slot(cid);
         let task_ctx = slot.get_mut(&cid).unwrap();
@@ -2260,6 +2261,7 @@ impl<E: Engine, L: LockManager> TxnScheduler<E, L> {
             lock_wait_token,
             cb.unwrap_normal_request_callback(),
             lock_info.parameters.allow_lock_with_conflict,
+            tracker,
         );
         let first_batch_cb = ctx.get_callback_for_first_write_batch();
         task_ctx.cb = Some(SchedulerTaskCallback::NormalRequestCallback(first_batch_cb));

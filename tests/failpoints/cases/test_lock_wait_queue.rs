@@ -36,7 +36,14 @@ fn make_waiter(
     let token = mgr.allocate_token();
     let (tx, rx) = mpsc::channel();
     let cb = StorageCallback::PessimisticLock(Box::new(move |res| tx.send(res).unwrap()));
-    let ctx = LockWaitContext::new(key.clone(), queues.clone(), token, cb, true);
+    let ctx = LockWaitContext::new(
+        key.clone(),
+        queues.clone(),
+        token,
+        cb,
+        true,
+        Default::default(),
+    );
     let entry = Box::new(LockWaitEntry {
         key: key.clone(),
         lock_hash: key.gen_hash(),

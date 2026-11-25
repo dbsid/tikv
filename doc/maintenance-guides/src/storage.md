@@ -156,6 +156,8 @@ High-risk contracts:
 
 ## Observability And Operational Signals
 
+- Get, BatchGet and BufferBatchGet populate `StageLatencyStats` in nanoseconds.
+  Preserve sub-millisecond durations when exporting response execution details.
 - scheduler latency, latch wait, and pending-write signals
 - MVCC conflict, read, and GC-related metrics
 - flow-control and memory-quota behavior

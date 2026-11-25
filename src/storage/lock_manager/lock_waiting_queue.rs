@@ -784,6 +784,7 @@ mod tests {
                 token,
                 dummy_request_cb,
                 false,
+                Default::default(),
             );
 
             let parameters = PessimisticLockParameters {

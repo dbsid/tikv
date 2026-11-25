@@ -107,7 +107,7 @@ use tikv_util::{
     future::try_poll,
     quota_limiter::QuotaLimiter,
     resource_control::group_label,
-    time::{Instant, InstantExt, ThreadReadId, duration_to_ms, duration_to_sec},
+    time::{Instant, InstantExt, ThreadReadId, duration_to_sec},
 };
 use tracker::{
     TlsTrackedFuture, TrackerToken, clear_tls_tracker_token, set_tls_tracker_token,
@@ -796,12 +796,12 @@ impl<E: Engine, L: LockManager, F: KvFormat> Storage<E, L, F> {
                         stage_snap_recv_ts.saturating_duration_since(stage_begin_ts);
                     let process_wall_time =
                         stage_finished_ts.saturating_duration_since(stage_snap_recv_ts);
-                    let latency_stats = StageLatencyStats {
-                        schedule_wait_time_ns: schedule_wait_time.as_nanos() as u64,
-                        snapshot_wait_time_ns: snapshot_wait_time.as_nanos() as u64,
-                        wait_wall_time_ns: wait_wall_time.as_nanos() as u64,
-                        process_wall_time_ns: process_wall_time.as_nanos() as u64,
-                    };
+                    let latency_stats = StageLatencyStats::from_durations(
+                        schedule_wait_time,
+                        snapshot_wait_time,
+                        wait_wall_time,
+                        process_wall_time,
+                    );
                     with_tls_tracker(|tracker| {
                         tracker.metrics.read_pool_schedule_wait_nanos =
                             schedule_wait_time.as_nanos() as u64;
@@ -1280,12 +1280,12 @@ impl<E: Engine, L: LockManager, F: KvFormat> Storage<E, L, F> {
                         tracker.metrics.read_pool_schedule_wait_nanos =
                             schedule_wait_time.as_nanos() as u64;
                     });
-                    let latency_stats = StageLatencyStats {
-                        schedule_wait_time_ns: duration_to_ms(schedule_wait_time),
-                        snapshot_wait_time_ns: duration_to_ms(snapshot_wait_time),
-                        wait_wall_time_ns: duration_to_ms(wait_wall_time),
-                        process_wall_time_ns: duration_to_ms(process_wall_time),
-                    };
+                    let latency_stats = StageLatencyStats::from_durations(
+                        schedule_wait_time,
+                        snapshot_wait_time,
+                        wait_wall_time,
+                        process_wall_time,
+                    );
                     Ok((
                         result,
                         KvGetStatistics {
@@ -1503,12 +1503,12 @@ impl<E: Engine, L: LockManager, F: KvFormat> Storage<E, L, F> {
                         tracker.metrics.read_pool_schedule_wait_nanos =
                             schedule_wait_time.as_nanos() as u64;
                     });
-                    let latency_stats = StageLatencyStats {
-                        schedule_wait_time_ns: duration_to_ms(schedule_wait_time),
-                        snapshot_wait_time_ns: duration_to_ms(snapshot_wait_time),
-                        wait_wall_time_ns: duration_to_ms(wait_wall_time),
-                        process_wall_time_ns: duration_to_ms(process_wall_time),
-                    };
+                    let latency_stats = StageLatencyStats::from_durations(
+                        schedule_wait_time,
+                        snapshot_wait_time,
+                        wait_wall_time,
+                        process_wall_time,
+                    );
                     record_logical_read_bytes(stats.processed_size as u64);
                     Ok((
                         result?,

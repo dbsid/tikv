@@ -1252,6 +1252,73 @@ def gRPC() -> RowPanel:
     return layout.row_panel
 
 
+def LocalKV() -> RowPanel:
+    layout = Layout(title="Local KV (FFI)")
+    metric = "tikv_server_local_msg_duration_seconds"
+    layout.row(
+        [
+            graph_panel(
+                title="Local KV requests per second",
+                description="Completed in-process requests by TiKV command.",
+                yaxes=yaxes(left_format=UNITS.REQUESTS_PER_SEC),
+                targets=[
+                    target(
+                        expr=expr_sum_rate(metric + "_count", by_labels=["type"]),
+                        additional_groupby=True,
+                    )
+                ],
+            ),
+            graph_panel(
+                title="Local KV service duration " + OPTIONAL_QUANTILE_INPUT,
+                description="Time from entering the local service to completing the request.",
+                yaxes=yaxes(left_format=UNITS.SECONDS),
+                null_point_mode=NULL_AS_NULL,
+                targets=[
+                    target(
+                        expr=expr_histogram_quantile(
+                            0.99, metric, by_labels=["type"], is_optional_quantile=True
+                        ),
+                        legend_format="{{type}}",
+                        additional_groupby=True,
+                    )
+                ],
+            ),
+        ]
+    )
+    stage_panels = []
+    for path, commands in (
+        ("read", "kv_get|kv_batch_get|coprocessor"),
+        ("write", "kv_prewrite|kv_commit|kv_pessimistic_lock"),
+    ):
+        stage_panels.append(
+            graph_panel(
+                title=f"Local KV {path} stage duration " + OPTIONAL_QUANTILE_INPUT,
+                description="Each stage includes only positive durations reported by "
+                "completed requests. Stages can overlap and their percentiles cannot be added.",
+                yaxes=yaxes(left_format=UNITS.SECONDS),
+                null_point_mode=NULL_AS_NULL,
+                targets=[
+                    target(
+                        expr=expr_histogram_quantile(
+                            0.99,
+                            "tikv_server_local_request_stage_duration_seconds",
+                            label_selectors=[f'type=~"{commands}"'],
+                            by_labels=["type", "stage"],
+                            is_optional_quantile=True,
+                        ),
+                        legend_format="{{type}} - {{stage}}",
+                        additional_groupby=True,
+                    )
+                ],
+            )
+        )
+    layout.row(stage_panels)
+    # Reserve IDs for this inserted row to preserve links to existing panels.
+    for panel_id, panel in enumerate([layout.row_panel, *layout.row_panel.panels], 657):
+        panel.id = panel_id
+    return layout.row_panel
+
+
 def ThreadCPU() -> RowPanel:
     layout = Layout(title="Thread CPU")
     layout.row(
@@ -11206,6 +11273,7 @@ dashboard = Dashboard(
         Server(),
         # Entrance of Write and Read
         gRPC(),
+        LocalKV(),
         Storage(),
         LocalReader(),
         # CPU and IO
