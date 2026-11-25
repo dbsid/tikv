@@ -1961,7 +1961,7 @@
             {
               "title": "TiKV-Details / Local KV (FFI) / read stages",
               "type": "absolute",
-              "url": "../RDVQiEzZz/tikv-details?viewPanel=660&from=${__from}&to=${__to}&var-k8s_cluster=${k8s_cluster:percentencode}&var-tidb_cluster=${tidb_cluster:percentencode}"
+              "url": "d/RDVQiEzZz/test-cluster-tikv-details?viewPanel=660&from=${__from}&to=${__to}&var-k8s_cluster=${k8s_cluster:percentencode}&var-tidb_cluster=${tidb_cluster:percentencode}"
             }
           ],
           "nullPointMode": "null",
@@ -2062,7 +2062,7 @@
             {
               "title": "TiKV-Details / Local KV (FFI) / read stages",
               "type": "absolute",
-              "url": "../RDVQiEzZz/tikv-details?viewPanel=660&from=${__from}&to=${__to}&var-k8s_cluster=${k8s_cluster:percentencode}&var-tidb_cluster=${tidb_cluster:percentencode}"
+              "url": "d/RDVQiEzZz/test-cluster-tikv-details?viewPanel=660&from=${__from}&to=${__to}&var-k8s_cluster=${k8s_cluster:percentencode}&var-tidb_cluster=${tidb_cluster:percentencode}"
             }
           ],
           "nullPointMode": "null",
