@@ -102,6 +102,18 @@ High-risk service contracts:
 - It is hot-path code and should be reviewed with latency and allocation in
   mind.
 
+### Embedded KV requests
+
+The local service in `service/kv.rs` records completed responses in
+`tikv_server_local_msg_duration_seconds` by command type. Its
+`tikv_server_local_request_stage_duration_seconds` histogram observes
+nonzero durations from `ExecDetailsV2` on the same completion path for both
+synchronous returns and asynchronous callbacks. Read stages use the scan and
+time details. Transactional write stages use the scheduler and Raft timings in
+the write detail. An early response may precede apply, and persist and commit
+can overlap. Stage counts therefore depend on what each response reports.
+The TiKV status port exposes both the local and gRPC histograms.
+
 ### Server runtime
 
 - `server.rs` builds and owns the gRPC server runtime and related pools.

@@ -172,6 +172,18 @@ make_auto_flush_static_metric! {
 }
 
 make_static_metric! {
+    // Cache the finite set of label pairs once. A local point read is only
+    // a few microseconds, so avoid a HistogramVec lookup for each stage.
+    pub struct LocalReadStages: Histogram {
+        "type" => { kv_get, kv_batch_get, coprocessor },
+        "stage" => { read_pool_wait, snapshot, read_process },
+    }
+
+    pub struct LocalWriteStages: Histogram {
+        "type" => { kv_prewrite, kv_commit, kv_pessimistic_lock },
+        "stage" => { latch_wait, scheduler_process, persist_log, commit_log, apply_wait, apply_log },
+    }
+
     pub label_enum GlobalGrpcTypeKind {
         kv_get,
     }
@@ -270,6 +282,15 @@ lazy_static! {
         exponential_buckets(5e-6, 2.0, 24).unwrap() // 5us ~ 42s
     )
     .unwrap();
+    static ref LOCAL_REQUEST_STAGES: HistogramVec = register_histogram_vec!(
+        "tikv_server_local_request_stage_duration_seconds",
+        "Nonzero stage durations from local KV response execution details",
+        &["type", "stage"],
+        exponential_buckets(1e-6, 2.0, 24).unwrap()
+    )
+    .unwrap();
+    pub static ref LOCAL_READ_STAGES: LocalReadStages = LocalReadStages::from(&LOCAL_REQUEST_STAGES);
+    pub static ref LOCAL_WRITE_STAGES: LocalWriteStages = LocalWriteStages::from(&LOCAL_REQUEST_STAGES);
     pub static ref GRPC_MSG_HISTOGRAM_VEC: HistogramVec = register_histogram_vec!(
         "tikv_grpc_msg_duration_seconds",
         "Bucketed histogram of grpc server messages",

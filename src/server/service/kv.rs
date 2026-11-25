@@ -1383,8 +1383,7 @@ impl<E: Engine, L: LockManager, F: KvFormat> crate::server::local::LocalKvServic
     fn call(
         &self,
         req: batch_commands_request::Request,
-    ) -> futures::future::BoxFuture<'static, Result<batch_commands_response::Response, Error>>
-    {
+    ) -> futures::future::BoxFuture<'static, Result<batch_commands_response::Response, Error>> {
         let (tx, mut rx) = unbounded(WakePolicy::Immediately);
         let mut batcher = None;
         let res = handle_batch_commands_request(
@@ -1690,6 +1689,51 @@ fn handle_batch_commands_request<E: Engine, L: LockManager, F: KvFormat>(
     Ok(())
 }
 
+/// These durations were measured by the storage, coprocessor and Raft
+/// workers. Zero also represents an unreported or skipped stage.
+fn observe_local_request_stages(label: GrpcTypeKind, details: &ExecDetailsV2) {
+    fn observe(hist: &prometheus::Histogram, nanos: u64) {
+        if nanos > 0 {
+            hist.observe(nanos_to_secs(nanos));
+        }
+    }
+
+    match label {
+        GrpcTypeKind::kv_get | GrpcTypeKind::kv_batch_get | GrpcTypeKind::coprocessor => {
+            let stages = match label {
+                GrpcTypeKind::kv_get => &LOCAL_READ_STAGES.kv_get,
+                GrpcTypeKind::kv_batch_get => &LOCAL_READ_STAGES.kv_batch_get,
+                _ => &LOCAL_READ_STAGES.coprocessor,
+            };
+            let scan = details.get_scan_detail_v2();
+            observe(
+                &stages.read_pool_wait,
+                scan.get_read_pool_schedule_wait_nanos(),
+            );
+            observe(&stages.snapshot, scan.get_get_snapshot_nanos());
+            observe(
+                &stages.read_process,
+                details.get_time_detail_v2().get_process_wall_time_ns(),
+            );
+        }
+        GrpcTypeKind::kv_prewrite | GrpcTypeKind::kv_commit | GrpcTypeKind::kv_pessimistic_lock => {
+            let stages = match label {
+                GrpcTypeKind::kv_prewrite => &LOCAL_WRITE_STAGES.kv_prewrite,
+                GrpcTypeKind::kv_commit => &LOCAL_WRITE_STAGES.kv_commit,
+                _ => &LOCAL_WRITE_STAGES.kv_pessimistic_lock,
+            };
+            let write = details.get_write_detail();
+            observe(&stages.latch_wait, write.get_latch_wait_nanos());
+            observe(&stages.scheduler_process, write.get_process_nanos());
+            observe(&stages.persist_log, write.get_persist_log_nanos());
+            observe(&stages.commit_log, write.get_commit_log_nanos());
+            observe(&stages.apply_wait, write.get_apply_batch_wait_nanos());
+            observe(&stages.apply_log, write.get_apply_log_nanos());
+        }
+        _ => {}
+    }
+}
+
 /// Like `handle_measures_for_batch_commands`, but records the request in
 /// `tikv_server_local_msg_duration_seconds` instead of the gRPC histograms, so
 /// gRPC metrics only count requests that crossed the network.
@@ -1721,9 +1765,14 @@ fn handle_measures_for_local(measures: &mut MeasuredBatchResponse) {
             _ => None,
         });
         if let Some(exec_details) = exec_details {
+            observe_local_request_stages(measure.label, exec_details);
             let nanos = elapsed.as_nanos() as u64;
-            exec_details.mut_time_detail().set_total_rpc_wall_time_ns(nanos);
-            exec_details.mut_time_detail_v2().set_total_rpc_wall_time_ns(nanos);
+            exec_details
+                .mut_time_detail()
+                .set_total_rpc_wall_time_ns(nanos);
+            exec_details
+                .mut_time_detail_v2()
+                .set_total_rpc_wall_time_ns(nanos);
         }
     }
 }
