@@ -110,10 +110,12 @@ The local service in `service/kv.rs` records completed responses in
 nonzero durations from `ExecDetailsV2` on the same completion path for both
 synchronous returns and asynchronous callbacks. Read stages use the scan and
 time details. A store-batched Coprocessor request contributes one sample per
-reporting task, while its service duration counts once. Transactional write stages use the scheduler and Raft timings in
-the write detail, including pessimistic row-lock waits. The stage buckets span
-1 µs to about 67 s. An early response may precede apply, and persist and commit
-can overlap. Stage counts therefore depend on what each response reports.
+reporting task, while its service duration counts once. Transactional write
+stages use the scheduler and Raft timings in the write detail. A pessimistic
+row-lock wait is timed from enqueue preparation until the blocked request
+finishes. The stage buckets span 1 µs to about 67 s. An early response can
+precede scheduler completion, persistence or apply. Persist and commit can
+overlap. Stage counts therefore depend on what each response reports.
 The TiKV status port exposes both the local and gRPC histograms. In TiKV-Details,
 open **Local KV (FFI)** directly below **gRPC** to compare request rates and
 service latency, then inspect the read and write stages for the selected stores.

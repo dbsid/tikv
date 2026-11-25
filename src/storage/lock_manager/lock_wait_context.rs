@@ -19,9 +19,11 @@ use std::{
         atomic::{AtomicBool, Ordering},
         mpsc,
     },
+    time::Instant,
 };
 
 use parking_lot::Mutex;
+use tracker::{GLOBAL_TRACKERS, TrackerToken};
 use txn_types::Key;
 
 use crate::storage::{
@@ -41,6 +43,8 @@ pub struct LockWaitContextInner {
     /// Usually, requests are accepted from RPC, and in this case calling
     /// the callback means returning the response to the client via RPC.
     cb: StorageCallback,
+    tracker: TrackerToken,
+    wait_started: Instant,
 }
 
 /// The content of the `LockWaitContext` that needs to be shared among all
@@ -122,8 +126,17 @@ pub struct LockWaitContextSharedState {
 }
 
 impl LockWaitContextSharedState {
-    fn new(lock_wait_token: LockWaitToken, key: Key, cb: StorageCallback) -> Self {
-        let inner = LockWaitContextInner { cb };
+    fn new(
+        lock_wait_token: LockWaitToken,
+        key: Key,
+        cb: StorageCallback,
+        tracker: TrackerToken,
+    ) -> Self {
+        let inner = LockWaitContextInner {
+            cb,
+            tracker,
+            wait_started: Instant::now(),
+        };
         let (tx, rx) = mpsc::channel();
         Self {
             ctx_inner: Mutex::new(Some(inner)),
@@ -205,9 +218,15 @@ impl<L: LockManager> LockWaitContext<L> {
         lock_wait_token: LockWaitToken,
         cb: StorageCallback,
         allow_lock_with_conflict: bool,
+        tracker: TrackerToken,
     ) -> Self {
         Self {
-            shared_states: Arc::new(LockWaitContextSharedState::new(lock_wait_token, key, cb)),
+            shared_states: Arc::new(LockWaitContextSharedState::new(
+                lock_wait_token,
+                key,
+                cb,
+                tracker,
+            )),
             lock_wait_queues,
             allow_lock_with_conflict,
         }
@@ -302,6 +321,12 @@ impl<L: LockManager> LockWaitContext<L> {
         // to take the `ctx_inner` more than once.
         let ctx_inner = self.shared_states.ctx_inner.lock().take().unwrap();
 
+        // The response callback reads and releases this tracker. Waiter cleanup
+        // runs asynchronously and can finish after the response is delivered.
+        GLOBAL_TRACKERS.with_tracker(ctx_inner.tracker, |tracker| {
+            tracker.metrics.pessimistic_lock_wait_nanos =
+                ctx_inner.wait_started.elapsed().as_nanos() as u64;
+        });
         if !self.allow_lock_with_conflict {
             // The result must be an owned error.
             let err = result.unwrap_err().try_into().unwrap();
@@ -361,7 +386,14 @@ mod tests {
     ) {
         let (cb, rx) = create_storage_cb();
         let token = lock_wait_queues.get_lock_mgr().allocate_token();
-        let ctx = LockWaitContext::new(key.clone(), lock_wait_queues.clone(), token, cb, false);
+        let ctx = LockWaitContext::new(
+            key.clone(),
+            lock_wait_queues.clone(),
+            token,
+            cb,
+            false,
+            Default::default(),
+        );
         (token, ctx, rx)
     }
 
